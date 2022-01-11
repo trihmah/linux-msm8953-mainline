@@ -868,6 +868,7 @@ properties:
           - enum:
               - lenovo,tbx605f
               - motorola,ali
+              - samsung,a6plte
           - const: qcom,sdm450
 
       - items:
