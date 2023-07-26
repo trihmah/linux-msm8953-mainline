@@ -92,6 +92,7 @@ struct dwc3_qcom {
 };
 
 #define to_dwc3_qcom(d) container_of((d), struct dwc3_qcom, dwc)
+static void dwc3_qcom_select_utmi_clk(struct dwc3_qcom *qcom);
 
 static inline void dwc3_qcom_setbits(void __iomem *base, u32 offset, u32 val)
 {
@@ -478,6 +479,10 @@ static int dwc3_qcom_resume(struct dwc3_qcom *qcom, bool wakeup)
 				  PWR_EVNT_LPM_IN_L2_MASK | PWR_EVNT_LPM_OUT_L2_MASK);
 	}
 
+	dwc3_qcom_select_utmi_clk(qcom);
+
+	dwc3_qcom_vbus_override_enable(qcom, qcom->mode != USB_DR_MODE_HOST);
+
 	qcom->is_suspended = false;
 
 	return 0;
@@ -504,6 +509,9 @@ static irqreturn_t qcom_dwc3_resume_irq(int irq, void *data)
 
 static void dwc3_qcom_select_utmi_clk(struct dwc3_qcom *qcom)
 {
+	if (!device_property_read_bool(qcom->dev, "qcom,select-utmi-as-pipe-clk"))
+		return;
+
 	/* Configure dwc3 to use UTMI clock as PIPE clock not present */
 	dwc3_qcom_setbits(qcom->qscratch_base, QSCRATCH_GENERAL_CFG,
 			  PIPE_UTMI_CLK_DIS);
@@ -649,7 +657,6 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 	struct resource		res;
 	struct resource		*r;
 	int			ret;
-	bool			ignore_pipe_clk;
 	bool			wakeup_source;
 
 	qcom = devm_kzalloc(&pdev->dev, sizeof(*qcom), GFP_KERNEL);
@@ -712,10 +719,7 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 	 * Disable pipe_clk requirement if specified. Used when dwc3
 	 * operates without SSPHY and only HS/FS/LS modes are supported.
 	 */
-	ignore_pipe_clk = device_property_read_bool(dev,
-				"qcom,select-utmi-as-pipe-clk");
-	if (ignore_pipe_clk)
-		dwc3_qcom_select_utmi_clk(qcom);
+	dwc3_qcom_select_utmi_clk(qcom);
 
 	qcom->dwc.dev = dev;
 	probe_data.dwc = &qcom->dwc;
