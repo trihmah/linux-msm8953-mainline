@@ -1342,6 +1342,8 @@
 				      "dsi0pllbyte",
 				      "dsi1pll",
 				      "dsi1pllbyte";
+
+			power-domains = <&rpmpd MSM8953_VDDCX>;
 		};
 
 		tcsr_mutex: hwlock@1905000 {
@@ -1468,7 +1470,7 @@
 				phys = <&mdss_dsi0_phy>;
 
 				operating-points-v2 = <&dsi0_opp_table>;
-				power-domains = <&rpmpd MSM8953_VDDCX>;
+				power-domains = <&rpmpd MDSS_GDSC>;
 
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -1560,7 +1562,7 @@
 				phys = <&mdss_dsi1_phy>;
 
 				operating-points-v2 = <&dsi1_opp_table>;
-				power-domains = <&rpmpd MSM8953_VDDCX>;
+				power-domains = <&rpmpd MDSS_GDSC>;
 
 				status = "disabled";
 
