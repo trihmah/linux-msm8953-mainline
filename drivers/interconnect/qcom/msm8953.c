@@ -1163,6 +1163,16 @@ static const struct regmap_config msm8953_bimc_regmap_config = {
 	.val_bits = 32,
 };
 
+static const u32 msm8953_bimc_ftbl[] = {
+	19200,  100800,
+	211200, 278400,
+	384000, 422400,
+	566800, 672000,
+	768000, 806400,
+	844800, 931200,
+	0,
+};
+
 static const struct qcom_icc_desc msm8953_bimc = {
 	.type = QCOM_ICC_BIMC,
 	.bus_clk_desc = &bimc_clk,

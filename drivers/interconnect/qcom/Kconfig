@@ -62,6 +62,13 @@ config INTERCONNECT_QCOM_MSM8953
 	  This is a driver for the Qualcomm Network-on-Chip on msm8953-based
 	  platforms.
 
+config INTERCONNECT_QCOM_MSM8953_BWMON
+	tristate "Qualcomm MSM8953 BW monitor"
+	depends on DEBUG_FS
+	help
+	  This is a driver for the BIMC bandwidth monitoring on msm8953-based
+	  platforms.
+
 config INTERCONNECT_QCOM_MSM8974
 	tristate "Qualcomm MSM8974 interconnect driver"
 	depends on INTERCONNECT_QCOM
