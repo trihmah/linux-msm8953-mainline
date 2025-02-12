@@ -35,6 +35,14 @@ config APM_POWER
 	  Say Y here to enable support APM status emulation using
 	  battery class devices.
 
+config SM5708_POWER
+	tristate "Siliconmitus SM5708 PMIC support"
+	depends on I2C
+	depends on OF
+	select REGMAP_I2C
+	help
+	  Say Y here to enable support for the SM5708 PMIC.
+
 config GENERIC_ADC_BATTERY
 	tristate "Generic battery support using IIO"
 	depends on IIO
