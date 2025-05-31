@@ -1073,7 +1073,7 @@ static irqreturn_t smbchg_handle_temp_shutdown(int irq, void *data)
 {
 	struct smbchg_chip *chip = data;
 
-	hw_protection_shutdown("Charger thermal emergency", 100);
+	hw_protection_trigger("Charger thermal emergency", 100);
 
 	smbchg_charging_enable(chip, false);
 	smbchg_usb_enable(chip, false);
