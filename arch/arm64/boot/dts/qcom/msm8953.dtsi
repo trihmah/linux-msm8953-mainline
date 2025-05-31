@@ -1010,12 +1010,12 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 
-			cpu_speed_bin: cpu_speed_bin@124 {
+			cpu_speed_bin: cpu_speed_bin@125 {
 				reg = <0x125 1>;
 				bits = <0 3>;
 			};
 
-			cpr_efuse_revision: fusing_rev@23c {
+			cpr_efuse_revision: fusing_rev@23e {
 				reg = <0x23e 1>;
 				bits = <5 3>;
 			};
