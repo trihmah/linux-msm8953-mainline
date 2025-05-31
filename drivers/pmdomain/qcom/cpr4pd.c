@@ -42,8 +42,6 @@
 #define CPR_VOLT_CEILING_UV		1065000U
 #define CPR_FUSE_OFFSET_SIGN		BIT(5)
 #define CPR_FUSE_OFFSET_MASK		GENMASK(4, 0)
-#define CPR_FUSE_REVISION_BYTE_OFFSET	(0x23e)
-#define CPR_FUSE_REVISION_FMASK		GENMASK(7, 5)
 #define CPR_PD_COUNT			2
 
 /* Can't query this from the regulator because it has multiple ranges */
@@ -81,7 +79,6 @@ struct cpr_info {
 	bool acc_use_apcs;
 	const struct cpr_pd_info *pds[CPR_PD_COUNT];
 };
-
 
 static const struct cpr_pd_info msm8953_pd_info = {
 	.init_volt_fuses = {{ 71, 24 }, { 71, 18 }, { 71, 12 }, { 71, 6 }},
@@ -351,7 +348,7 @@ static int cpr_init_domain(struct cpr_drv *drv, unsigned int index)
 	const struct cpr_pd_info *info = drv->info->pds[index];
 	struct device *dev = drv->dev;
 	struct nvmem_device *nvmem;
-	u8 speed_bin, fusing_rev;
+	u32 speed_bin, fusing_rev;
 	struct cpr_pd_data *data;
 	struct cpr_pd *cpd;
 	int ret, i;
@@ -382,7 +379,7 @@ static int cpr_init_domain(struct cpr_drv *drv, unsigned int index)
 	if (ret)
 		return ret;
 
-	ret = nvmem_cell_read_u8(dev, "speed_bin", &speed_bin);
+	ret = nvmem_cell_read_variable_le_u32(dev, "speed_bin", &speed_bin);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to read speed bin\n");
 
@@ -390,13 +387,10 @@ static int cpr_init_domain(struct cpr_drv *drv, unsigned int index)
 	if (IS_ERR(nvmem))
 		return dev_err_probe(dev, ret, "failed to get nvmem device\n");
 
-	ret = nvmem_device_read(nvmem, CPR_FUSE_REVISION_BYTE_OFFSET,
-				sizeof(fusing_rev), &fusing_rev);
-	if (ret < sizeof(fusing_rev))
-		return dev_err_probe(dev, ret < 0 ? ret : -ENODATA,
-				     "failed to read fusing revision\n");
+	ret = nvmem_cell_read_variable_le_u32(dev, "fusing_rev", &fusing_rev);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to read fusing revision\n");
 
-	fusing_rev = FIELD_GET(CPR_FUSE_REVISION_FMASK, fusing_rev);
 	if (!index)
 		dev_info(dev, "speed_bin=%d fusing_revision=%d\n",
 			 speed_bin, fusing_rev);
