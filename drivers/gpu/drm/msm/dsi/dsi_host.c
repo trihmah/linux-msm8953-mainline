@@ -194,6 +194,7 @@ static const struct msm_dsi_cfg_handler *
 dsi_get_config(struct msm_dsi_host *msm_host)
 {
 	const struct msm_dsi_cfg_handler *cfg_hnd = NULL;
+	struct device *dev = &msm_host->pdev->dev;
 	struct clk *ahb_clk;
 	int ret;
 	u32 major = 0, minor = 0;
