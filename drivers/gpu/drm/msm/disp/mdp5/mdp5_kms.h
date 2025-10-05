@@ -17,7 +17,6 @@
 #include "mdp5_ctl.h"
 #include "mdp5_smp.h"
 
-struct icc_path;
 struct mdp5_kms {
 	struct mdp_kms base;
 
@@ -68,10 +67,6 @@ struct mdp5_kms {
 	struct mdp_irq error_handler;
 
 	int enable_count;
-
-	int num_paths;
-	struct icc_path *paths[2];
-	struct icc_path *path_rot;
 };
 #define to_mdp5_kms(x) container_of(x, struct mdp5_kms, base)
 
@@ -109,7 +104,6 @@ struct mdp5_plane_state {
 	 * display (ex. DSI command mode display)
 	 */
 	bool needs_dirtyfb;
-	u64 plane_bw;
 };
 #define to_mdp5_plane_state(x) \
 		container_of(x, struct mdp5_plane_state, base)
@@ -140,9 +134,6 @@ struct mdp5_crtc_state {
 	 * writing CTL[n].START until encoder->enable()
 	 */
 	bool defer_start;
-
-	u64 new_crtc_bw;
-	u64 old_crtc_bw;
 };
 #define to_mdp5_crtc_state(x) \
 		container_of(x, struct mdp5_crtc_state, base)
@@ -302,8 +293,6 @@ struct drm_encoder *mdp5_encoder_init(struct drm_device *dev,
 void mdp5_encoder_set_intf_mode(struct drm_encoder *encoder, bool cmd_mode);
 int mdp5_encoder_get_linecount(struct drm_encoder *encoder);
 u32 mdp5_encoder_get_framecount(struct drm_encoder *encoder);
-
-void mdp5_kms_set_bandwidth(struct mdp5_kms *mdp5_kms);
 
 #ifdef CONFIG_DRM_MSM_DSI
 void mdp5_cmd_encoder_mode_set(struct drm_encoder *encoder,
