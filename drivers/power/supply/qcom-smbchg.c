@@ -1552,7 +1552,7 @@ static int smbchg_probe(struct platform_device *pdev)
 	chip->data = of_device_get_match_data(chip->dev);
 
 	supply_config.drv_data = chip;
-	supply_config.of_node = pdev->dev.of_node;
+	supply_config.fwnode = dev_fwnode(&pdev->dev);
 	chip->usb_psy = devm_power_supply_register(
 		chip->dev, &smbchg_usb_psy_desc, &supply_config);
 	if (IS_ERR(chip->usb_psy)) {
