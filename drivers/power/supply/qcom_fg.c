@@ -1132,7 +1132,7 @@ static int qcom_fg_probe(struct platform_device *pdev)
 	}
 
 	/* Get charger power supply */
-	chip->chg_psy = devm_power_supply_get_by_phandle(chip->dev,
+	chip->chg_psy = devm_power_supply_get_by_reference(chip->dev,
 							"power-supplies");
 	if (IS_ERR(chip->chg_psy)) {
 		ret = PTR_ERR(chip->chg_psy);
@@ -1141,7 +1141,7 @@ static int qcom_fg_probe(struct platform_device *pdev)
 	}
 
 	supply_config.drv_data = chip;
-	supply_config.of_node = pdev->dev.of_node;
+	supply_config.fwnode = dev_fwnode(&pdev->dev);
 
 	chip->batt_psy = devm_power_supply_register(chip->dev,
 			&batt_psy_desc, &supply_config);
