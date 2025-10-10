@@ -687,10 +687,7 @@ alpha_pll_round_rate(unsigned long rate, unsigned long prate, u32 *l, u64 *a,
 		quotient++;
 
 	*a = quotient;
-	if (alpha_width > ALPHA_BITWIDTH)
-		*a <<= alpha_width - ALPHA_BITWIDTH;
-
-	return alpha_pll_calc_rate(prate, *l, quotient, alpha_width);
+	return alpha_pll_calc_rate(prate, *l, *a, alpha_width);
 }
 
 static const struct pll_vco *
@@ -797,6 +794,9 @@ static void clk_alpha_pll_update_configs(struct clk_alpha_pll *pll, const struct
 					 u32 l, u64 alpha, u32 alpha_width, bool alpha_en)
 {
 	regmap_write(pll->clkr.regmap, PLL_L_VAL(pll), l);
+
+	if (alpha_width > ALPHA_BITWIDTH)
+		alpha <<= alpha_width - ALPHA_BITWIDTH;
 
 	if (alpha_width > 32)
 		regmap_write(pll->clkr.regmap, PLL_ALPHA_VAL_U(pll), upper_32_bits(alpha));
@@ -2849,9 +2849,7 @@ static int clk_alpha_pll_stromer_set_rate(struct clk_hw *hw, unsigned long rate,
 	u64 a;
 
 	rate = alpha_pll_round_rate(rate, prate, &l, &a, ALPHA_REG_BITWIDTH);
-	/* Alternative fix */
 
-	/*a <<= ALPHA_REG_BITWIDTH - ALPHA_BITWIDTH; */
 	regmap_write(pll->clkr.regmap, PLL_L_VAL(pll), l);
 
 	a <<= ALPHA_REG_BITWIDTH - ALPHA_BITWIDTH;
