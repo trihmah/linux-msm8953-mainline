@@ -100,9 +100,7 @@ static const struct cpr_pd_info msm8953_pd_info = {
 static const struct cpr_info msm8953_info = {
 	.acc_use_apcs = false,
 	.apm_thr_uv = 850000,
-	/* We always provide 2 domains but on MSM8953 one is an alias
-	 * to the first one */
-	.pds = { &msm8953_pd_info, NULL },
+	.pds = { &msm8953_pd_info },
 };
 
 static const struct cpr_pd_info sdm632_pwr_pd_info = {
@@ -144,8 +142,10 @@ struct cpr_pd_data {
 	u32 uV_step[CPR_NUM_REF_POINTS-1];
 };
 
+struct cpr_drv;
 struct cpr_pd {
-	const struct cpr_pd_data *data;
+	struct cpr_drv *drv;
+	struct cpr_pd_data data;
 	struct generic_pm_domain pd;
 	/* Votes from PM domain consumers */
 	u32 uv, pstate;
@@ -161,8 +161,6 @@ struct cpr_drv {
 	struct mutex lock;
 	/* Array Power Mux and Memory Accelerator mappings */
 	void __iomem *apm, *acc;
-	/* Floor voltage used during boot until consumers are synced */
-	u32 boot_up_uv;
 	/* Active (aggregated) parameters */
 	u32 uv, pstate;
 };
@@ -243,6 +241,7 @@ static int cpr_vreg_set_voltage(struct cpr_drv *drv, u32 uv)
 			return ret;
 
 		drv->uv = apm_thr_uv;
+
 		ret = cpr_apm_switch_supply(drv, uv > apm_thr_uv);
 		if (ret)
 			return ret;
@@ -255,16 +254,19 @@ static int cpr_vreg_set_voltage(struct cpr_drv *drv, u32 uv)
 	return ret;
 }
 
-static int cpr_pd_set_pstate_unlocked(struct cpr_drv *drv, struct cpr_pd *cpd,
-				      unsigned int pstate)
+static int cpr_pd_set_pstate(struct generic_pm_domain *domain,
+			     unsigned int pstate)
 {
-	u32 pstate_aggr, uv_aggr, uv, uv_prev = drv->uv;;
-	int ret, i;
+	struct cpr_pd *cpd = to_cpr_pd(domain);
+	struct cpr_drv *drv = cpd->drv;
+	u32 pstate_aggr, uv_aggr, uv, uv_prev;
+	int ret = 0, i;
 
-	lockdep_assert_held(&drv->lock);
+	guard(mutex)(&drv->lock);
 
+	uv_prev = drv->uv;
 	pstate_aggr = pstate;
-	uv_aggr = uv = cpr_interpolate_uv(cpd->data, pstate);
+	uv_aggr = uv = cpr_interpolate_uv(&cpd->data, pstate);
 
 	for (i = 0; i < CPR_PD_COUNT; i ++) {
 		struct cpr_pd *other = to_cpr_pd(drv->pds[i]);
@@ -274,48 +276,27 @@ static int cpr_pd_set_pstate_unlocked(struct cpr_drv *drv, struct cpr_pd *cpd,
 		}
 	}
 
-	uv_aggr = max(uv_aggr, drv->boot_up_uv);
+	if (pstate_aggr != drv->pstate || uv_aggr != uv_prev) {
+		if (uv_aggr < uv_prev)
+			cpr_configure_mem_acc(drv, pstate_aggr);
 
-	if (pstate_aggr == drv->pstate && uv_aggr == uv_prev)
-		goto skip_update;
+		ret = cpr_vreg_set_voltage(drv, uv_aggr);
+		if (ret) {
+			dev_err(drv->dev, "failed to set voltage %u uV: %d\n", uv, ret);
+			cpr_vreg_set_voltage(drv, uv_prev);
+			if (uv_aggr < uv_prev)
+				cpr_configure_mem_acc(drv, drv->pstate);
+			return ret;
+		}
 
-	if (uv_aggr < uv_prev)
-		cpr_configure_mem_acc(drv, pstate_aggr);
+		if (uv_aggr > uv_prev)
+			cpr_configure_mem_acc(drv, pstate_aggr);
+	}
 
-	ret = cpr_vreg_set_voltage(drv, uv_aggr);
-	if (ret)
-		goto fail_restore_prev;
-
-	if (uv_aggr > uv_prev)
-		cpr_configure_mem_acc(drv, pstate_aggr);
-
-skip_update:
+	drv->pstate = pstate_aggr;
 	cpd->uv = uv;
 	cpd->pstate = pstate;
-	drv->pstate = pstate_aggr;
 	return 0;
-
-fail_restore_prev:
-	dev_err(drv->dev, "failed to set voltage %u uV: %d\n", uv, ret);
-
-	if (uv_aggr < uv_prev)
-		cpr_configure_mem_acc(drv, drv->pstate);
-	cpr_vreg_set_voltage(drv, uv_prev);
-	return ret;
-}
-
-
-static int cpr_pd_set_pstate(struct generic_pm_domain *domain,
-			     unsigned int pstate)
-{
-	struct cpr_drv *drv = dev_get_drvdata(domain->dev.parent);
-	struct cpr_pd *cpd = to_cpr_pd(domain);
-	int ret;
-
-	mutex_lock(&drv->lock);
-	ret = cpr_pd_set_pstate_unlocked(drv, cpd, pstate);
-	mutex_unlock(&drv->lock);
-	return ret;
 }
 
 static void cpr_remove_domain(void *data)
@@ -353,20 +334,17 @@ static int cpr_init_domain(struct cpr_drv *drv, unsigned int index)
 	struct cpr_pd *cpd;
 	int ret, i;
 
-	if (!info) {
-		drv->pds[index] = drv->pds[index - 1];
+	if (!info)
 		return 0;
-	}
 
 	cpd = devm_kzalloc(dev, sizeof(*cpd), GFP_KERNEL);
 	if (!cpd)
 		return -ENOMEM;
 
-	cpd->data = data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
-	if (!data)
-		return -ENOMEM;
-
+	data = &cpd->data;
+	cpd->drv = drv;
 	drv->pds[index] = &cpd->pd;
+	cpd->uv = drv->uv;
 	cpd->pd.name = index ? "cpr_pd_perf" : "cpr_pd_pwr";
 	cpd->pd.set_performance_state = cpr_pd_set_pstate;
 	cpd->pd.dev.parent = dev;
@@ -434,6 +412,7 @@ static int cpr_init_domain(struct cpr_drv *drv, unsigned int index)
 	dev_info(&cpd->pd.dev, "level=%5u voltage=%2u uV\n",
 		 data->pstates[i], data->uV[i]);
 
+	drv->cell_data.num_domains = index + 1;
 	return 0;
 }
 
@@ -469,7 +448,7 @@ static int cpr_cpufreq_policy_notifier(struct notifier_block *nb,
 
 		pstate = dev_pm_opp_get_required_pstate(opp, 0);
 		dev_pm_opp_put(opp);
-		uVolt = cpr_interpolate_uv(cpd->data, pstate);
+		uVolt = cpr_interpolate_uv(&cpd->data, pstate);
 
 		dev_info(&cpd->pd.dev, "Freq=%lu Voltage=%u uV\n", freq / 1000, uVolt);
 
@@ -477,17 +456,6 @@ static int cpr_cpufreq_policy_notifier(struct notifier_block *nb,
 	}
 
 	return NOTIFY_OK;
-}
-
-static void cpr_sync_state(struct device *dev)
-{
-	struct cpr_drv *drv = dev_get_drvdata(dev);
-	struct cpr_pd *cpd = to_cpr_pd(drv->pds[0]);
-
-	mutex_lock(&drv->lock);
-	drv->boot_up_uv = 0;
-	cpr_pd_set_pstate_unlocked(drv, cpd, cpd->pstate);
-	mutex_unlock(&drv->lock);
 }
 
 static int cpr_probe(struct platform_device *pdev)
@@ -520,19 +488,16 @@ static int cpr_probe(struct platform_device *pdev)
 	drv->info = info = match->data;
 	drv->policy_nb.notifier_call = cpr_cpufreq_policy_notifier;
 	drv->cell_data.domains = drv->pds;
-	drv->cell_data.num_domains = CPR_PD_COUNT;
 	drv->vreg = devm_regulator_get(drv->dev, "apc");
 	if (IS_ERR(drv->vreg))
 		return dev_err_probe(drv->dev, PTR_ERR(drv->vreg),
 				"could not get regulator\n");
 
-	ret = regulator_get_voltage(drv->vreg);
+	drv->uv = ret = regulator_get_voltage(drv->vreg);
 	if (ret < 0)
 		return ret;
 
-	drv->boot_up_uv = drv->uv = ret;
-
-	dev_info(dev, "boot time voltage: %u uV\n", drv->boot_up_uv);
+	dev_info(dev, "boot time voltage: %u uV\n", drv->uv);
 
 	acc_reg_name = info->acc_use_apcs ? "apcs-mem-acc" : "tcsr-mem-acc";
 
@@ -579,7 +544,6 @@ static struct platform_driver cpr_driver = {
 	.driver = {
 		.name		= "qcom-cpr4pd",
 		.of_match_table = cpr_match_table,
-		.sync_state	= cpr_sync_state,
 	},
 	.probe	= cpr_probe,
 	.remove	= cpr_remove,
