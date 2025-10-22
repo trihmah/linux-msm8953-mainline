@@ -241,14 +241,16 @@ struct smbchg_chip {
 	struct power_supply_battery_info *batt_info;
 	struct power_supply *usb_psy;
 
-	struct regulator_desc otg_rdesc;
-	struct regulator_dev *otg_reg;
 	int otg_resets;
 
-	struct extcon_dev *edev;
-
 	spinlock_t sec_access_lock;
-	struct work_struct otg_reset_work;
+	struct delayed_work otg_reset_work;
+	struct delayed_work detect_work;
+	struct usb_role_switch *role_sw;
+	enum usb_role last_role;
+	bool role_inited;
+	/* prevent races with reset work */
+	struct mutex otg_lock;
 
 	const struct smbchg_data *data;
 
