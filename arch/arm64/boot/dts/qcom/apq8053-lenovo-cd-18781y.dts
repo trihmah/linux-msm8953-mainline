@@ -736,10 +736,6 @@
 	status = "okay";
 };
 
-&usb3_dwc3 {
-	dr_mode = "otg";
-};
-
 &zap_shader {
 	firmware-name = "qcom/msm8953/lenovo/cd-18781y/a506_zap.mdt";
 };
