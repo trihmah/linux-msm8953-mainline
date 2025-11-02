@@ -531,6 +531,7 @@
 		dvdd-supply = <&pm8953_l23>;
 		avdd-supply = <&avdd_cam_front>;
 		vio-supply = <&vddio_cam>;
+		flash-leds = <&front_flash>;
 		rotation = <90>;
 		orientation = <0>;
 
@@ -552,6 +553,8 @@
 		dvdd-supply = <&vdd_cam_aux>;
 		avdd-supply = <&vdd_cam_aux>;
 		dovdd-supply = <&vddio_cam>;
+		// V4L2 doesn't allow sharing flash-leds yet 
+		//flash-leds = <&rear_flash>;
 		rotation = <270>;
 		orientation = <1>;
 
@@ -576,6 +579,8 @@
 		dvdd-supply = <&vdd_cam_main>;
 		avdd-supply = <&vdd_cam_main>;
 		vio-supply = <&vdd_cam_main>;
+		lens-focus = <&lens_actuator>;
+		flash-leds = <&rear_flash>;
 		rotation = <270>;
 		orientation = <1>;
 
@@ -612,11 +617,13 @@
 };
 
 &i2c_3 {
+	clock-frequency = <100000>;
 	status = "okay";
 
 	lens_actuator: camera-lens@c {
 		compatible = "powerlogics,zc535";
 		reg = <0x0c>;
+		dvdd-supply = <&vdd_cam_main>;
 		vdd-supply = <&vdd_actuator>;
 		vio-supply = <&vddio_cam>;
 	};
