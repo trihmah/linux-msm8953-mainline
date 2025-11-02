@@ -8,6 +8,7 @@
 
 #include <linux/unaligned.h>
 #include <linux/errno.h>
+#include <linux/extcon-provider.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -21,6 +22,7 @@
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/reboot.h>
+#include <linux/regulator/driver.h>
 #include <linux/usb/role.h>
 #include <linux/util_macros.h>
 #include <linux/workqueue.h>
@@ -723,6 +725,60 @@ static int smbchg_otg_switch(struct smbchg_chip *chip, bool enable)
 	return ret;
 }
 
+/**
+ * @brief smbchg_otg_enable() - Enable OTG regulator
+ *
+ * @param rdev Pointer to regulator_dev
+ * @return 0 on success, -errno on failure
+ */
+static int smbchg_otg_enable(struct regulator_dev *rdev)
+{
+	struct smbchg_chip *chip = rdev_get_drvdata(rdev);
+
+	WARN_ON_ONCE(chip->role_sw);
+
+	return smbchg_otg_switch(chip, true);
+}
+
+/**
+ * @brief smbchg_otg_disable() - Disable OTG regulator
+ *
+ * @param rdev Pointer to regulator_dev
+ * @return 0 on success, -errno on failure
+ */
+static int smbchg_otg_disable(struct regulator_dev *rdev)
+{
+	struct smbchg_chip *chip = rdev_get_drvdata(rdev);
+
+	return smbchg_otg_switch(chip, false);
+}
+
+/**
+ * @brief smbchg_otg_is_enabled() - Check if OTG regulator is enabled
+ *
+ * @param rdev Pointer to regulator_dev
+ * @return int 1 if enabled, 0 if disabled
+ */
+static int smbchg_otg_is_enabled(struct regulator_dev *rdev)
+{
+	struct smbchg_chip *chip = rdev_get_drvdata(rdev);
+	u32 value = 0;
+	int ret;
+
+	ret = regmap_read(chip->regmap, chip->base + SMBCHG_BAT_IF_CMD_CHG,
+			  &value);
+	if (ret)
+		dev_err(chip->dev, "Failed to read OTG regulator status\n");
+
+	return !!(value & OTG_EN_BIT);
+}
+
+static const struct regulator_ops smbchg_otg_ops = {
+	.enable = smbchg_otg_enable,
+	.disable = smbchg_otg_disable,
+	.is_enabled = smbchg_otg_is_enabled,
+};
+
 static void smbchg_otg_reset_work(struct work_struct *work)
 {
 	struct smbchg_chip *chip =
@@ -742,34 +798,145 @@ static void smbchg_otg_reset_work(struct work_struct *work)
 	smbchg_otg_switch(chip, true);
 }
 
+/**
+ * @brief smbchg_extcon_update() - Update extcon properties and sync cables
+ *
+ * @param chip Pointer to smbchg_chip
+ */
+static void smbchg_extcon_update(struct smbchg_chip *chip,
+	bool usb_present, bool otg_present)
+
+{
+	enum power_supply_usb_type usb_type = smbchg_usb_get_type(chip);
+	int otg_vbus_present = smbchg_otg_is_enabled(chip->otg_reg);
+
+	extcon_set_state(chip->edev, EXTCON_USB, usb_present);
+	extcon_set_state(chip->edev, EXTCON_USB_HOST, otg_present);
+	extcon_set_property(chip->edev, EXTCON_USB_HOST, EXTCON_PROP_USB_VBUS,
+			    (union extcon_property_value)otg_vbus_present);
+
+	if (usb_present) {
+		extcon_set_state(chip->edev, EXTCON_CHG_USB_SDP,
+				 usb_type == POWER_SUPPLY_USB_TYPE_SDP);
+		extcon_set_state(chip->edev, EXTCON_CHG_USB_DCP,
+				 usb_type == POWER_SUPPLY_USB_TYPE_DCP);
+		extcon_set_state(chip->edev, EXTCON_CHG_USB_CDP,
+				 usb_type == POWER_SUPPLY_USB_TYPE_CDP);
+		extcon_set_property(
+			chip->edev, EXTCON_USB, EXTCON_PROP_USB_VBUS,
+			(union extcon_property_value)(
+				usb_type != POWER_SUPPLY_USB_TYPE_UNKNOWN));
+	} else {
+		/*
+		 * Charging extcon cables and VBUS are unavailable when
+		 * USB is not present.
+		 */
+		extcon_set_state(chip->edev, EXTCON_CHG_USB_SDP, false);
+		extcon_set_state(chip->edev, EXTCON_CHG_USB_DCP, false);
+		extcon_set_state(chip->edev, EXTCON_CHG_USB_CDP, false);
+		extcon_set_property(chip->edev, EXTCON_USB,
+				    EXTCON_PROP_USB_VBUS,
+				    (union extcon_property_value) false);
+	}
+
+	/* Sync all extcon cables */
+	extcon_sync(chip->edev, EXTCON_USB);
+	extcon_sync(chip->edev, EXTCON_USB_HOST);
+	extcon_sync(chip->edev, EXTCON_CHG_USB_SDP);
+	extcon_sync(chip->edev, EXTCON_CHG_USB_DCP);
+	extcon_sync(chip->edev, EXTCON_CHG_USB_CDP);
+}
+
+static const unsigned int smbchg_extcon_cable[] = {
+	EXTCON_USB,	    EXTCON_USB_HOST,	EXTCON_CHG_USB_SDP,
+	EXTCON_CHG_USB_DCP, EXTCON_CHG_USB_CDP, EXTCON_NONE,
+};
+
+static bool smbchg_check_role_switch(struct smbchg_chip *chip, bool otg_present)
+{
+	if (chip->role_sw)
+		return true;
+
+	if (chip->role_sw_timeout++ > 60) {
+		dev_info(chip->dev, "USB role switch is not found\n");
+		return false;
+	}
+
+	chip->role_sw = usb_role_switch_get(chip->dev);
+	if (!IS_ERR_OR_NULL(chip->role_sw)) {
+		usb_role_switch_set_role(chip->role_sw, USB_ROLE_NONE);
+		return true;
+	}
+
+	chip->role_sw = NULL;
+	if (otg_present)
+		schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(2000));
+
+	return false;
+}
+
 static void smbchg_detect_work(struct work_struct *work)
 {
 	struct smbchg_chip *chip =
 		container_of(work, struct smbchg_chip, detect_work.work);
-
         guard(mutex)(&chip->otg_lock);
 	bool usb_present = smbchg_usb_is_present(chip);
 	bool otg_present = smbchg_otg_is_present(chip);
+	enum power_supply_usb_type usb_type;
 	enum usb_role usb_role = USB_ROLE_NONE;
+	bool has_role_sw = smbchg_check_role_switch(chip, otg_present);
+	int ret;
 
-	if (otg_present)
-		usb_role = USB_ROLE_HOST;
-	else if (usb_present)
-		usb_role = USB_ROLE_DEVICE;
+	dev_dbg(chip->dev, "USB %spresent\n", usb_present ? "" : "not ");
 
-	if (chip->role_inited && usb_role == chip->last_role)
-		return;
+	usb_type = smbchg_usb_get_type(chip);
 
-	if (usb_role == USB_ROLE_HOST && !usb_present)
-		smbchg_otg_switch(chip, true);
-
-	usb_role_switch_set_role(chip->role_sw, usb_role);
-
-	if (chip->last_role == USB_ROLE_HOST)
+	if (!otg_present && has_role_sw)
 		smbchg_otg_switch(chip, false);
 
-	chip->last_role = usb_role;
-	chip->role_inited = true;
+	/*
+	 * Prepare for running AICL to find a suitable input current
+	 * limit if connected to a DCP or a CDP
+	 */
+	if (usb_present && (usb_type == POWER_SUPPLY_USB_TYPE_DCP ||
+			    usb_type == POWER_SUPPLY_USB_TYPE_CDP)) {
+		/*
+		 * Enable AICL to find a suitable current limit for the
+		 * newly plugged into port.
+		 */
+		ret = smbchg_usb_aicl_enable(chip);
+		if (ret) {
+			dev_err(chip->dev, "Failed to enable AICL: %pe\n",
+				ERR_PTR(ret));
+			return;
+		}
+
+		/* Enable USB charge path to make AICL run and start charging */
+		ret = smbchg_usb_enable(chip, true);
+		if (ret) {
+			dev_err(chip->dev,
+				"Failed to enable USB charge path: %pe\n",
+				ERR_PTR(ret));
+			return;
+		}
+	}
+
+	smbchg_extcon_update(chip, usb_present, otg_present);
+
+	if (!has_role_sw)
+		return;
+
+	if (otg_present) {
+		usb_role = USB_ROLE_HOST;
+		smbchg_otg_switch(chip, !usb_present);
+	} else if (usb_present) {
+		usb_role = USB_ROLE_DEVICE;
+	}
+
+	if (usb_role != chip->last_role) {
+		usb_role_switch_set_role(chip->role_sw, usb_role);
+		chip->last_role = usb_role;
+	}
 }
 
 static irqreturn_t smbchg_handle_charger_error(int irq, void *data)
@@ -850,44 +1017,8 @@ static irqreturn_t smbchg_handle_batt_presence(int irq, void *data)
 static irqreturn_t smbchg_handle_usb_source_detect(int irq, void *data)
 {
 	struct smbchg_chip *chip = data;
-	bool usb_present;
-	enum power_supply_usb_type usb_type;
-	int ret;
 
-	usb_present = smbchg_usb_is_present(chip);
-	dev_dbg(chip->dev, "USB %spresent\n", usb_present ? "" : "not ");
-
-	usb_type = smbchg_usb_get_type(chip);
-
-	/*
-	 * Prepare for running AICL to find a suitable input current
-	 * limit if connected to a DCP or a CDP
-	 */
-	if (usb_present && (usb_type == POWER_SUPPLY_USB_TYPE_DCP ||
-			    usb_type == POWER_SUPPLY_USB_TYPE_CDP)) {
-		/*
-		 * Enable AICL to find a suitable current limit for the
-		 * newly plugged into port.
-		 */
-		ret = smbchg_usb_aicl_enable(chip);
-		if (ret) {
-			dev_err(chip->dev, "Failed to enable AICL: %pe\n",
-				ERR_PTR(ret));
-			return IRQ_NONE;
-		}
-
-		/* Enable USB charge path to make AICL run and start charging */
-		ret = smbchg_usb_enable(chip, true);
-		if (ret) {
-			dev_err(chip->dev,
-				"Failed to enable USB charge path: %pe\n",
-				ERR_PTR(ret));
-			return IRQ_NONE;
-		}
-	}
-
-	if (chip->role_sw)
-		schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(20));
+	schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(20));
 	power_supply_changed(chip->usb_psy);
 
 	return IRQ_HANDLED;
@@ -904,8 +1035,7 @@ static irqreturn_t smbchg_handle_usbid_change(int irq, void *data)
 	 * 5ms for good measure.
 	 */
 
-	if (chip->role_sw)
-		schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(20));
+	schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(20));
 
 	return IRQ_HANDLED;
 }
@@ -915,6 +1045,10 @@ static irqreturn_t smbchg_handle_otg_fail(int irq, void *data)
 	struct smbchg_chip *chip = data;
 
 	dev_err(chip->dev, "OTG regulator failure");
+
+	/* Report failure */
+	regulator_notifier_call_chain(chip->otg_reg, REGULATOR_EVENT_FAIL,
+				      NULL);
 
 	return IRQ_HANDLED;
 }
@@ -943,6 +1077,14 @@ static irqreturn_t smbchg_handle_otg_oc(int irq, void *data)
 	}
 
 	dev_warn(chip->dev, "OTG over-current");
+
+	/* Report over-current */
+	regulator_notifier_call_chain(chip->otg_reg,
+				      REGULATOR_EVENT_OVER_CURRENT, NULL);
+
+	/* Regulator is automatically disabled in hardware on over-current */
+	regulator_notifier_call_chain(chip->otg_reg, REGULATOR_EVENT_DISABLE,
+				      NULL);
 
 	return IRQ_HANDLED;
 }
@@ -1167,7 +1309,18 @@ static int smbchg_get_property(struct power_supply *psy,
 		val->intval = ret;
 		break;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
-		val->intval = chip->batt_info->constant_charge_current_max_ua;
+		if (!chip->batt_info) {
+			struct power_supply_battery_info *batt_info;
+
+			ret = power_supply_get_battery_info(chip->usb_psy, &batt_info);
+			if (ret)
+				return ret;
+
+			val->intval = batt_info->constant_charge_current_max_ua;
+			power_supply_put_battery_info(chip->usb_psy, batt_info);
+		} else {
+			val->intval = chip->batt_info->constant_charge_current_max_ua;
+		}
 		break;
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 		ret = smbchg_usb_get_ilim(chip);
@@ -1401,8 +1554,8 @@ static int smbchg_init(struct smbchg_chip *chip)
 static int smbchg_probe(struct platform_device *pdev)
 {
 	struct smbchg_chip *chip;
+	struct regulator_config config = {};
 	struct power_supply_config supply_config = {};
-	struct fwnode_handle *fwnode;
 	int i, irq, ret;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
@@ -1428,6 +1581,26 @@ static int smbchg_probe(struct platform_device *pdev)
 	mutex_init(&chip->otg_lock);
 	INIT_DELAYED_WORK(&chip->otg_reset_work, smbchg_otg_reset_work);
 	INIT_DELAYED_WORK(&chip->detect_work, smbchg_detect_work);
+
+	/* Initialize OTG regulator */
+	chip->otg_rdesc.id = -1;
+	chip->otg_rdesc.name = "otg-vbus";
+	chip->otg_rdesc.ops = &smbchg_otg_ops;
+	chip->otg_rdesc.owner = THIS_MODULE;
+	chip->otg_rdesc.type = REGULATOR_VOLTAGE;
+	chip->otg_rdesc.of_match = "otg-vbus";
+
+	config.dev = chip->dev;
+	config.driver_data = chip;
+
+	chip->otg_reg =
+		devm_regulator_register(chip->dev, &chip->otg_rdesc, &config);
+	if (IS_ERR(chip->otg_reg)) {
+		dev_err(chip->dev,
+			"Failed to register OTG VBUS regulator: %pe\n",
+			chip->otg_reg);
+		return PTR_ERR(chip->otg_reg);
+	}
 
 	chip->data = of_device_get_match_data(chip->dev);
 
@@ -1462,6 +1635,26 @@ static int smbchg_probe(struct platform_device *pdev)
 
 	chip->smbchg_lite = of_property_read_bool(chip->dev->of_node, "smbchg-lite");
 
+	/* Initialize extcon */
+	chip->edev = devm_extcon_dev_allocate(chip->dev, smbchg_extcon_cable);
+	if (IS_ERR(chip->edev)) {
+		dev_err(chip->dev, "Failed to allocate extcon device: %pe\n",
+			chip->edev);
+		return PTR_ERR(chip->edev);
+	}
+
+	ret = devm_extcon_dev_register(chip->dev, chip->edev);
+	if (ret) {
+		dev_err(chip->dev, "Failed to register extcon device: %pe\n",
+			ERR_PTR(ret));
+		return ret;
+	}
+
+	extcon_set_property_capability(chip->edev, EXTCON_USB,
+				       EXTCON_PROP_USB_VBUS);
+	extcon_set_property_capability(chip->edev, EXTCON_USB_HOST,
+				       EXTCON_PROP_USB_VBUS);
+
 	/* Initialize charger */
 	ret = smbchg_init(chip);
 	if (ret)
@@ -1493,19 +1686,7 @@ static int smbchg_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, chip);
 
-	fwnode = fwnode_get_named_child_node(dev_fwnode(chip->dev), "connector");
-	if (!IS_ERR_OR_NULL(fwnode)) {
-		chip->role_sw = fwnode_usb_role_switch_get(fwnode);
-		if (IS_ERR(chip->role_sw))
-			chip->role_sw = NULL;
-
-		fwnode_handle_put(fwnode);
-	}
-
-	if (!chip->role_sw)
-		dev_info(chip->dev, "USB role switch is not found\n");
-	else
-		schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(0));
+	schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(2000));
 	return 0;
 }
 
@@ -1542,10 +1723,8 @@ static int smbchg_system_resume(struct device *dev)
 {
 	struct smbchg_chip *chip = dev_get_drvdata(dev);
 
-	if (!chip->role_sw)
-		return 0;
-
 	schedule_delayed_work(&chip->detect_work, msecs_to_jiffies(0));
+
 	return 0;
 }
 
