@@ -890,6 +890,15 @@ static const struct pmi8994_fg_data pmi8996_data = {
 	.sram_regs = &sram_regs_rev3,
 };
 
+static void pmi8994_fg_cleanup(void *data)
+{
+	struct pmi8994_fg_chip *chip = data;
+
+	disable_delayed_work_sync(&chip->sram_release_access_work);
+	disable_delayed_work_sync(&chip->status_changed_work);
+	destroy_workqueue(chip->sram_wq);
+}
+
 static int pmi8994_fg_probe(struct platform_device *pdev)
 {
 	struct power_supply_config supply_config = {};
@@ -905,10 +914,17 @@ static int pmi8994_fg_probe(struct platform_device *pdev)
 	if (!chip)
 		return -ENOMEM;
 
-	chip->dev = &pdev->dev;
 	data = of_device_get_match_data(&pdev->dev);
+
+	chip->dev = &pdev->dev;
+	chip->nb.notifier_call = pmi8994_fg_notifier_call;
 	chip->sram_regs = data->sram_regs;
 	mutex_init(&chip->lock);
+	init_waitqueue_head(&chip->sram_waitq);
+	INIT_DELAYED_WORK(&chip->sram_release_access_work,
+			pmi8994_fg_sram_release_access_worker);
+	INIT_DELAYED_WORK(&chip->status_changed_work,
+			pmi8994_fg_status_changed_worker);
 
 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chip->regmap) {
@@ -957,12 +973,23 @@ static int pmi8994_fg_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	chip->sram_wq = create_singlethread_workqueue("pmi8994_fg");
+	if (!chip->sram_wq)
+		return -ENOMEM;
+
+	ret = devm_add_action_or_reset(chip->dev, pmi8994_fg_cleanup, chip);
+	if (ret)
+		return ret;
+
 	/* Get charger power supply */
 	chip->chg_psy = devm_power_supply_get_by_reference(chip->dev, "power-supplies");
-	if (IS_ERR(chip->chg_psy)) {
-		ret = PTR_ERR(chip->chg_psy);
+	ret = PTR_ERR_OR_ZERO(chip->chg_psy);
+	if (ret) {
+		if (ret == -EPROBE_DEFER)
+			return ret;
+
 		dev_err(chip->dev, "Failed to get charger supply: %d\n", ret);
-		return ret;
+		chip->chg_psy = NULL;
 	}
 
 	supply_config.drv_data = chip;
@@ -984,12 +1011,6 @@ static int pmi8994_fg_probe(struct platform_device *pdev)
 			irq);
 		return irq;
 	}
-
-	init_waitqueue_head(&chip->sram_waitq);
-
-	chip->sram_wq = create_singlethread_workqueue("pmi8994_fg");
-	INIT_DELAYED_WORK(&chip->sram_release_access_work,
-			  pmi8994_fg_sram_release_access_worker);
 
 	ret = devm_request_threaded_irq(chip->dev, irq, NULL,
 					pmi8994_fg_handle_mem_avail,
@@ -1052,20 +1073,7 @@ static int pmi8994_fg_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	/* Optional: Get charger power supply for status checking */
-	chip->chg_psy = power_supply_get_by_reference(chip->dev->fwnode,
-						    "power-supplies");
-	if (IS_ERR(chip->chg_psy)) {
-		ret = PTR_ERR(chip->chg_psy);
-		dev_warn(chip->dev, "Failed to get charger supply: %d\n", ret);
-		chip->chg_psy = NULL;
-	}
-
 	if (chip->chg_psy) {
-		INIT_DELAYED_WORK(&chip->status_changed_work,
-				  pmi8994_fg_status_changed_worker);
-
-		chip->nb.notifier_call = pmi8994_fg_notifier_call;
 		ret = power_supply_reg_notifier(&chip->nb);
 		if (ret) {
 			dev_err(chip->dev,
@@ -1075,14 +1083,6 @@ static int pmi8994_fg_probe(struct platform_device *pdev)
 	}
 
 	return 0;
-}
-
-static void pmi8994_fg_remove(struct platform_device *pdev)
-{
-	struct pmi8994_fg_chip *chip = platform_get_drvdata(pdev);
-
-	if (chip->sram_wq)
-		destroy_workqueue(chip->sram_wq);
 }
 
 static int pmi8994_fg_suspend(struct device *dev)
@@ -1118,7 +1118,6 @@ MODULE_DEVICE_TABLE(of, fg_match_id_table);
 
 static struct platform_driver pmi8994_fg_driver = {
 	.probe = pmi8994_fg_probe,
-	.remove = pmi8994_fg_remove,
 	.driver = {
 		.name = "qcom-pmi8994-fg",
 		.of_match_table = fg_match_id_table,
