@@ -799,6 +799,12 @@ config VIDEO_VGXY61
 	  This is a Video4Linux2 sensor driver for the ST VGXY61
 	  camera sensor.
 
+config VIDEO_DUMMY_CAMERA
+	tristate "Dummy camera"
+	# depends on OF && GPIOLIB
+	help
+	  This is an dummy camera driver for i2c address search.
+
 source "drivers/media/i2c/ccs/Kconfig"
 source "drivers/media/i2c/et8ek8/Kconfig"
 
