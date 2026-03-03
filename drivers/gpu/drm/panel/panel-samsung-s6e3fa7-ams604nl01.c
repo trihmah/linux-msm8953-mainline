@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
+#include <linux/fb.h>
 
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
@@ -25,17 +26,17 @@
 #define GRAY_SCALE_MAX	    256
 #define RGB_COMPENSATION    9
 #define FP_SHIFT	    22
-#define VREG0_REF_6P5 ((int) (6.5 * (2 << 21)))
+#define VREG0_REF_6P5 ((int) (6.5 * (1 << 22)))
 #define GAMMA_CMD_LEN	    34
-#define NUM_VREGS	    3
+#define NUM_VREGS	    ARRAY_SIZE(s6e3fa7_ams604nl01_vregs)
 
 struct s6e3fa7_ams604nl01_drv {
 	struct device *dev;
 	struct drm_panel panel;
 	struct gpio_desc *reset;
 	struct mipi_dsi_device *dsi;
-	struct regulator_bulk_data vregs[NUM_VREGS];
-	bool bl_inited, vregs_enabled;
+	struct regulator_bulk_data *vregs;
+	bool gamma_inited, panel_on;
 
 	/* calibration values */
 	u8 elvss_params[2], irc_params[2];
@@ -44,9 +45,11 @@ struct s6e3fa7_ams604nl01_drv {
 
 enum { VT, V1, V7, V11, V23, V35, V51, V87, V151, V203, V255, V_MAX };
 
-static const u8 level1_on[] = { 0xf0, 0x5a, 0x5a };
-static const u8 level1_off[] = { 0xf0, 0xa5, 0xa5 };
-static const u8 gamma_update_cmd[] = { 0xf7, 0x03 };
+static const struct regulator_bulk_data s6e3fa7_ams604nl01_vregs[] = {
+	{ .supply = "vdd" },
+	{ .supply = "vddr" },
+	{ .supply = "vci" },
+};
 
 static const signed char red_offsets[LUMINANCE_MAX][RGB_COMPENSATION] = {
 /*	{  R255,  R203,  R151,  R87,  R51,  R35,  R23,  R11,   R7  },	*/
@@ -371,8 +374,9 @@ static const struct brightness_level {
 	u8 irc28_30;
 	u8 irc31_33;
 } brightness_settings[] = {
+	{   3,   1, 0x08,  0x94,  0xcc, 0x04,  0x1c,  0x00,  0x00,  0x00 },
 	{   3,   1, 0x08,  0x93,  0xcc, 0x04,  0x1c,  0x00,  0x00,  0x00 },
-	{   3,   1, 0x08,  0x93,  0xcc, 0x04,  0x1c,  0x00,  0x00,  0x00 },
+	{   3,   1, 0x08,  0x92,  0xcc, 0x04,  0x1c,  0x00,  0x00,  0x00 },
 	{   3,   1, 0x08,  0x91,  0xcc, 0x04,  0x1c,  0x00,  0x00,  0x00 },
 	{   3,   1, 0x08,  0x8f,  0xcc, 0x04,  0x1c,  0x00,  0x00,  0x00 },
 	{   3,   1, 0x08,  0x89,  0xcc, 0x04,  0x1c,  0x00,  0x00,  0x00 },
@@ -628,8 +632,6 @@ static const struct brightness_level {
 	{ 420,  73, 0x00,  0x10,  0xdc, 0x04,  0x1e,  0x50,  0x1a,  0x1b },
 };
 
-
-
 static const int inflection_voltages[V_MAX] = {0, 1, 7, 11, 23, 35, 51, 87, 151, 203, 255};
 
 /* fraction for gamma code */
@@ -648,15 +650,15 @@ static const int fraction[V_MAX][2] = {
 	{129, 860},	/* V255 */
 };
 
-/**********************************************************************************************\
- * 1. VT       : VREG1 - (VREG1 -     0   ) * (OutputGamma + numerator_TP)/(denominator_TP)   *
- * 2. V255     : VREG1 - (VREG1 -     0   ) * (OutputGamma + numerator_TP)/(denominator_TP)   *
- * 3. VT1, VT7 : VREG1 - (VREG1 - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP)   *
- * 4. other VT :    VT - (   VT - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP)   *
-\**********************************************************************************************/
+/*
+ * 1. VT       : VREG1 - (VREG1 -     0   ) * (OutputGamma + numerator_TP)/(denominator_TP)
+ * 2. V255     : VREG1 - (VREG1 -     0   ) * (OutputGamma + numerator_TP)/(denominator_TP)
+ * 3. VT1, VT7 : VREG1 - (VREG1 - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP)
+ * 4. other VT :    VT - (   VT - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP)
+ */
 
 static unsigned long long calc_gamma_voltage(int VT, int V_nextTP, int OutputGamma,
-								const int fraction[])
+					     const int fraction[])
 {
 	unsigned long long val1, val2, val3, val4;
 
@@ -672,7 +674,7 @@ static unsigned long long calc_gamma_voltage(int VT, int V_nextTP, int OutputGam
 }
 
 /*
- *	each TP's gamma voltage calculation (2.3.3)
+ * each TP's gamma voltage calculation (2.3.3)
  */
 static void TP_gamma_voltage_calc(int mtp[V_MAX], int rgb[V_MAX])
 {
@@ -684,10 +686,16 @@ static void TP_gamma_voltage_calc(int mtp[V_MAX], int rgb[V_MAX])
 	/* VT first */
 	MTP_OFFSET = mtp[VT];
 
-	switch(MTP_OFFSET) {
-		case 0 ... 9: vt_coef = 12 * MTP_OFFSET ; break;
-		case 10 ... 14: vt_coef = 10 * MTP_OFFSET + 38; break;
-		case 15: vt_coef = 10 * MTP_OFFSET + 36; break;
+	switch (MTP_OFFSET) {
+	case 0 ... 9:
+		vt_coef = 12 * MTP_OFFSET;
+		break;
+	case 10 ... 14:
+		vt_coef = 10 * MTP_OFFSET + 38;
+		break;
+	case 15:
+		vt_coef = 10 * MTP_OFFSET + 36;
+		break;
 	}
 
 	rgb[VT] = calc_gamma_voltage(VREG0_REF_6P5, 0, vt_coef, fraction[VT]);
@@ -700,21 +708,17 @@ static void TP_gamma_voltage_calc(int mtp[V_MAX], int rgb[V_MAX])
 	/* V203 ~ V11 */
 	for (i = V203; i >= V11; i--) {
 		MTP_OFFSET = mtp[i];
-		OutputGamma = MTP_OFFSET + 0x80;//center_gamma[i];
-		rgb[i] = calc_gamma_voltage(rgb[VT], rgb[i + 1],
-					OutputGamma, fraction[i]);
+		OutputGamma = MTP_OFFSET + 0x80; //center_gamma[i];
+		rgb[i] = calc_gamma_voltage(rgb[VT], rgb[i + 1], OutputGamma, fraction[i]);
 	}
 
 	/* V7, V1*/
 	for (i = V7; i >= V1; i--) {
 		MTP_OFFSET = mtp[i];
-		OutputGamma = MTP_OFFSET + 0x80;//center_gamma[i];
-		rgb[i] = calc_gamma_voltage(VREG0_REF_6P5, rgb[i + 1],
-					OutputGamma, fraction[i]);
+		OutputGamma = MTP_OFFSET + 0x80; //center_gamma[i];
+		rgb[i] = calc_gamma_voltage(VREG0_REF_6P5, rgb[i + 1], OutputGamma, fraction[i]);
 	}
 }
-
-
 
 // 1. V255 : ((VREG1 - V255) * denominator_TP / vreg) - numerator_TP
 static unsigned long long v255_TP_gamma_code_calc(int vreg, int grayscale, const int fraction[])
@@ -731,7 +735,8 @@ static unsigned long long v255_TP_gamma_code_calc(int vreg, int grayscale, const
 
 // 2. other : (VT    - V_TP)* denominator_TP /(VT    - V_nextTP) - numerator_TP
 // 3. V7,V1 : (VREG1 - V_TP)* denominator_TP /(VREG1 - V_nextTP) - numerator_TP
-static unsigned long long other_TP_gamma_code_calc(int VT, int grayscale, int nextGRAY, const int fraction[])
+static unsigned long long other_TP_gamma_code_calc(int VT, int grayscale, int nextGRAY,
+						   const int fraction[])
 {
 	signed long long val1, val2, val3, val4;
 	int gray_sign = 1, nextgray_sign = 1;
@@ -750,7 +755,7 @@ static unsigned long long other_TP_gamma_code_calc(int VT, int grayscale, int ne
 	do_div(val2, val3);
 	val2 *= (gray_sign * nextgray_sign);
 	val4 = val2 - fraction[0];
-	return (unsigned long long) val4;
+	return (unsigned long long)val4;
 }
 
 /* gray scale = V_down + (V_up - V_down) * num / den */
@@ -775,8 +780,10 @@ static int generate_gray_scale(int grayscale[GRAY_SCALE_MAX], int rgb[V_MAX])
 {
 	int i, V_idx, cal_cnt = 0;
 
-	/* grayscale OUTPUT VOLTAGE of TP's (V1,V1,V7,V11,V23,V35,V51,V87,V151,V203,V255)
-	   (V1 is VREG1) */
+	/*
+	 * grayscale OUTPUT VOLTAGE of TP's (V1,V1,V7,V11,V23,V35,V51,V87,V151,V203,V255)
+	 * (V1 is VREG1)
+	 */
 
 	grayscale[0] = VREG0_REF_6P5;
 	for (i = 1; i < V_MAX; i++)
@@ -789,11 +796,11 @@ static int generate_gray_scale(int grayscale[GRAY_SCALE_MAX], int rgb[V_MAX])
 			cal_cnt = 1;
 			V_idx++;
 		} else {
-			int den = inflection_voltages[V_idx] - inflection_voltages[V_idx-1];
-			grayscale[i] = gray_scale_calc(
-				grayscale[inflection_voltages[V_idx-1]],
-				grayscale[inflection_voltages[V_idx]],
-				den - cal_cnt, den);
+			int den = inflection_voltages[V_idx] - inflection_voltages[V_idx - 1];
+
+			grayscale[i] = gray_scale_calc(grayscale[inflection_voltages[V_idx - 1]],
+						       grayscale[inflection_voltages[V_idx]],
+						       den - cal_cnt, den);
 			cal_cnt++;
 		}
 	}
@@ -803,15 +810,15 @@ static int generate_gray_scale(int grayscale[GRAY_SCALE_MAX], int rgb[V_MAX])
 
 static int char_to_int(char data)
 {
-	return (data & 0x80) ? -((int) (data & 0x7f)) : (int) data;
+	return (data & 0x80) ? -((int)(data & 0x7f)) : (int)data;
 }
 
 enum { COMP_R, COMP_G, COMP_B, N_COMP };
 
 static void s6e3fa7_ams604nl01_gamma_cmd_add_component(struct s6e3fa7_ams604nl01_drv *drv,
-		int mtp[V_MAX], int rgb[V_MAX],
-		int grayscale[GRAY_SCALE_MAX],
-		int component, int table_index)
+						       int mtp[V_MAX], int rgb[V_MAX],
+						       int grayscale[GRAY_SCALE_MAX],
+						       int component, int table_index)
 {
 	int gamma[V_MAX] = { 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 256 };
 	const unsigned char *M_GRAY;
@@ -832,31 +839,38 @@ static void s6e3fa7_ams604nl01_gamma_cmd_add_component(struct s6e3fa7_ams604nl01
 		/* Generate gamma code */
 		// V255
 		TP = M_GRAY[V255];
-		gamma[V255] = v255_TP_gamma_code_calc(VREG0_REF_6P5,
-				grayscale[TP], fraction[V255]);
+		gamma[V255] = v255_TP_gamma_code_calc(VREG0_REF_6P5, grayscale[TP],
+						      fraction[V255]);
 
 		// V203 ~ V11
 		for (i = V203; i >= V11; i--) {
 			TP = M_GRAY[i];
-			nextTP = M_GRAY[i+1];
-			gamma[i] = other_TP_gamma_code_calc(rgb[VT],
-					grayscale[TP], grayscale[nextTP], fraction[i]);
+			nextTP = M_GRAY[i + 1];
+			gamma[i] = other_TP_gamma_code_calc(rgb[VT], grayscale[TP],
+							    grayscale[nextTP], fraction[i]);
 		}
 
 		// V7, V1
 		for (i = V7; i >= V1; i--) {
 			TP = M_GRAY[i];
-			nextTP = M_GRAY[i+1];
+			nextTP = M_GRAY[i + 1];
 			gamma[i] = other_TP_gamma_code_calc(VREG0_REF_6P5, grayscale[TP],
-					grayscale[nextTP], fraction[i]);
+							    grayscale[nextTP], fraction[i]);
 		}
 
 		/* Color Shift (RGB compensation) */
 		switch (component) {
-			case COMP_R: comp_offsets = red_offsets[table_index]; break;
-			case COMP_G: comp_offsets = green_offsets[table_index]; break;
-			case COMP_B: comp_offsets = blue_offsets[table_index]; break;
-			default: break;
+		case COMP_R:
+			comp_offsets = red_offsets[table_index];
+			break;
+		case COMP_G:
+			comp_offsets = green_offsets[table_index];
+			break;
+		case COMP_B:
+			comp_offsets = blue_offsets[table_index];
+			break;
+		default:
+			break;
 		}
 
 		for (i = 0; i < RGB_COMPENSATION; i++)
@@ -908,7 +922,7 @@ static void s6e3fa7_ams604nl01_gamma_init(struct s6e3fa7_ams604nl01_drv *drv, u8
 	/* V203 ~ V1 */
 	cnt = 5;
 	for (i = V203; i > VT; i--)
-		for (component = 0; component < N_COMP; component ++)
+		for (component = 0; component < N_COMP; component++)
 			mtp_offsets[component][i] = char_to_int(pfrom[cnt++]);
 
 	/* VT */
@@ -916,39 +930,29 @@ static void s6e3fa7_ams604nl01_gamma_init(struct s6e3fa7_ams604nl01_drv *drv, u8
 	mtp_offsets[COMP_G][VT] = (pfrom[1] >> 4) & 0xf;
 	mtp_offsets[COMP_B][VT] = pfrom[1] & 0x0f;
 
-	/********************************************************************************************/
-	/* Each TP's gamma voltage calculation							    */
-	/* 1. VT, V255 : VREG1 - VREG1 * (OutputGamma + numerator_TP)/(denominator_TP)		    */
-	/* 2. VT1, VT7 : VREG1 - (VREG1 - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP) */
-	/* 3. other VT : VT - (VT - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP)	    */
-	/********************************************************************************************/
+	/*
+	 * Each TP's gamma voltage calculation
+	 * 1. VT, V255 : VREG1 - VREG1 * (OutputGamma + numerator_TP)/(denominator_TP)
+	 * 2. VT1, VT7 : VREG1 - (VREG1 - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP)
+	 * 3. other VT : VT - (VT - V_nextTP) * (OutputGamma + numerator_TP)/(denominator_TP)
+	 */
 
-	for (component = 0; component < N_COMP; component ++) {
+	for (component = 0; component < N_COMP; component++) {
 		TP_gamma_voltage_calc(mtp_offsets[component], rgb_out[component]);
 		generate_gray_scale(grayscale, rgb_out[component]);
-		for (i = 0; i < LUMINANCE_MAX; i ++)
+		for (i = 0; i < LUMINANCE_MAX; i++)
 			s6e3fa7_ams604nl01_gamma_cmd_add_component(drv, mtp_offsets[component],
-					rgb_out[component], grayscale, component, i);
+								   rgb_out[component], grayscale,
+								   component, i);
 	}
 }
 
-static void s6e3fa7_ams604nl01_read_eeprom(struct mipi_dsi_multi_context* dsi_ctx,
-				   u8 cmd, u8 offset, u8 *output, u8 len)
+static void s6e3fa7_ams604nl01_read_eeprom(struct mipi_dsi_multi_context* dctx,
+				   u8 cmd, u8 offset, u8 *output, int len)
 {
-	int ret;
-	u8 offset_cmd [] = { 0xb0, 0x00 };
-
-	while (len > 0) {
-		offset_cmd[1] = offset;
-
-		mipi_dsi_generic_write_multi(dsi_ctx, offset_cmd, ARRAY_SIZE(offset_cmd));
-		mipi_dsi_dcs_read_multi(dsi_ctx, cmd, output, len > 8 ? 8 : len);
-		if (dsi_ctx->accum_err < 0)
-			return;
-
-		len -= ret;
-		output += ret;
-		offset += ret;
+	for (; len > 0; offset += 8, output += 8, len -= 8) {
+		mipi_dsi_generic_write_var_seq_multi(dctx, 0xb0, offset);
+		mipi_dsi_dcs_read_multi(dctx, cmd, output, min(8, len));
 	}
 }
 
@@ -960,72 +964,54 @@ static int s6e3fa7_ams604nl01_get_brightness(struct backlight_device *bl)
 static int s6e3fa7_ams604nl01_update_status(struct backlight_device *bl)
 {
 	struct s6e3fa7_ams604nl01_drv *drv = bl_get_data(bl);
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = drv->dsi };
-	struct mipi_dsi_device *dsi = drv->dsi;
+	struct mipi_dsi_multi_context dctx = { .dsi = drv->dsi };
 	const struct brightness_level *settings;
 	int brightness = bl->props.brightness;
-	u8 mipi_brightness = 0;
-	u8 aid_cmd[] =  { 0xb1, 0x00, 0x10 };
-	u8 elvss_cmd[] = {
-		0xb5, 0x14, 0xcc, 0x0d, 0x01, 0x34, 0x67, 0x9a,
-		0xcd, 0x01, 0x22, 0x33, 0x44, 0xc0, 0x00, 0x09,
-		0x99, 0x33, 0x13, 0x01, 0x11, 0x10, 0x00, 0x00,
-	};
-	u8 vint_cmd[] = { 0xf4, 0xbb, 0x1e };
-	u8 irc_cmd[] = { 0xb8, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
-		0x80, 0x61, 0x2c, 0x30, 0x4e, 0xc4,
-		0x33, 0x69, 0x12, 0x7a, 0xc7, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	};
 	u8 *gamma_cmd;
-	int ret, i;
 
-	if (!drv->bl_inited) {
+	if (!drv->gamma_inited) {
 		u8 mtp_data[32];
 
-		mipi_dsi_generic_write_multi(&dsi_ctx, level1_on, ARRAY_SIZE(level1_on));
+		mipi_dsi_generic_write_seq_multi(&dctx, LEVEL1_ON);
 
 		/* Read ELVSS DATA (B5[22:23]) */
-		s6e3fa7_ams604nl01_read_eeprom(&dsi_ctx, 0xb5, 0x16,
+		s6e3fa7_ams604nl01_read_eeprom(&dctx, 0xb5, 22,
 				drv->elvss_params, ARRAY_SIZE(drv->elvss_params));
 
 		/* Read IRC DATA (B8[0:1]) */
-		s6e3fa7_ams604nl01_read_eeprom(&dsi_ctx, 0xb8, 0,
+		s6e3fa7_ams604nl01_read_eeprom(&dctx, 0xb8, 0,
 				drv->irc_params, ARRAY_SIZE(drv->irc_params));
 
 		/* Read MTP OFFSET (C8[0:31]) */
-		s6e3fa7_ams604nl01_read_eeprom(&dsi_ctx, 0xc8, 0,
+		s6e3fa7_ams604nl01_read_eeprom(&dctx, 0xc8, 0,
 				mtp_data, ARRAY_SIZE(mtp_data));
 
-		mipi_dsi_generic_write_multi(&dsi_ctx, level1_off, ARRAY_SIZE(level1_off));
-		if (dsi_ctx.accum_err < 0)
-			return dsi_ctx.accum_err;
+		mipi_dsi_generic_write_seq_multi(&dctx, LEVEL1_OFF);
 
-		print_hex_dump(KERN_DEBUG, "MTP ", DUMP_PREFIX_OFFSET, 16, 1,
-				mtp_data, 32, false);
+		if (dctx.accum_err < 0)
+			return dctx.accum_err;
 
-		printk(KERN_DEBUG"ELVSS params: 0x%02x 0x%02x\n",
-				drv->elvss_params[0], drv->elvss_params[1]);
+		print_hex_dump(KERN_DEBUG, "MTP ", DUMP_PREFIX_OFFSET, 16, 1, mtp_data, 32, false);
 
-		printk(KERN_DEBUG"IRC params: 0x%02x 0x%02x\n",
-				drv->irc_params[0], drv->irc_params[1]);
+		printk(KERN_DEBUG "ELVSS params: 0x%02x 0x%02x\n",
+		       drv->elvss_params[0], drv->elvss_params[1]);
+
+		printk(KERN_DEBUG "IRC params: 0x%02x 0x%02x\n",
+		       drv->irc_params[0], drv->irc_params[1]);
 
 		s6e3fa7_ams604nl01_gamma_init(drv, mtp_data);
-		drv->bl_inited = true;
+		drv->gamma_inited = true;
 	}
 
 	if (bl->props.power != FB_BLANK_UNBLANK ||
-	    bl->props.state & (BL_CORE_SUSPENDED | BL_CORE_FBBLANK)) {
+	    bl->props.state & (BL_CORE_SUSPENDED | BL_CORE_FBBLANK))
 		return 0;
-	}
 
 	if (brightness == 0)
 		brightness = 1;
 
 	if (brightness < 0 || brightness > bl->props.max_brightness) {
-		dev_err(&dsi->dev, "%s brightness out of range", __func__);
+		dev_err(&drv->dsi->dev, "%s brightness out of range", __func__);
 		return -EINVAL;
 	}
 
@@ -1033,57 +1019,91 @@ static int s6e3fa7_ams604nl01_update_status(struct backlight_device *bl)
 
 	gamma_cmd = drv->gamma_cmds[clamp(settings->gamma_idx,
 				     (u16) 0,  (u16) (LUMINANCE_MAX - 1))];
-	elvss_cmd[23] = drv->elvss_params[0];
-	irc_cmd[1] = drv->irc_params[0];
-	irc_cmd[2] = drv->irc_params[1];
-	aid_cmd[1] = clamp((u8)settings->aid1, (u8) 0,(u8)  8);
-	aid_cmd[2] = settings->aid2;
-	vint_cmd[2] = settings->vint2;
-	elvss_cmd[2] = settings->elvss2;
-	elvss_cmd[3] = settings->elvss3;
-	for (i = 0; i < 3; i ++) {
-		irc_cmd[25 + i] = settings->irc25_27;
-		irc_cmd[28 + i] = settings->irc28_30;
-		irc_cmd[31 + i] = settings->irc31_33;
-	}
 
-	mipi_dsi_generic_write_multi(&dsi_ctx, level1_on, ARRAY_SIZE(level1_on));
-	mipi_dsi_generic_write_multi(&dsi_ctx, aid_cmd, ARRAY_SIZE(aid_cmd));
-	mipi_dsi_generic_write_multi(&dsi_ctx, elvss_cmd, ARRAY_SIZE(elvss_cmd));
-	mipi_dsi_generic_write_multi(&dsi_ctx, vint_cmd, ARRAY_SIZE(vint_cmd));
-	mipi_dsi_generic_write_multi(&dsi_ctx, irc_cmd, ARRAY_SIZE(irc_cmd));
-	mipi_dsi_generic_write_multi(&dsi_ctx, gamma_cmd, GAMMA_CMD_LEN);
-	mipi_dsi_generic_write_multi(&dsi_ctx, gamma_update_cmd, ARRAY_SIZE(gamma_update_cmd));
-	ret = mipi_dsi_generic_write(dsi, level1_off, ARRAY_SIZE(level1_off));
+	mipi_dsi_generic_write_seq_multi(&dctx, LEVEL1_ON);
+	mipi_dsi_generic_write_var_seq_multi(&dctx, 0xb1, settings->aid1,
+			settings->aid2);
+	mipi_dsi_generic_write_var_seq_multi(&dctx, 0xb5, 0x14, settings->elvss2,
+			settings->elvss3, 0x01, 0x34, 0x67, 0x9a, 0xcd, 0x01, 0x22,
+			0x33, 0x44, 0xc0, 0x00, 0x09, 0x99, 0x33, 0x13, 0x01, 0x11,
+			0x10, 0x00, drv->elvss_params[0]);
+	mipi_dsi_generic_write_var_seq_multi(&dctx, 0xf4, 0xbb, settings->vint2);
+	mipi_dsi_generic_write_var_seq_multi(&dctx, 0xb8, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x80, 0x00, 0x00, 0x00, 0x80, 0x61, 0x2c, 0x30, 0x4e,
+			0xc4, 0x33, 0x69, 0x12, 0x7a, 0xc7, 0x00, 0x00, 0x00, 0x00,
+			settings->irc25_27, settings->irc25_27, settings->irc25_27,
+			settings->irc28_30, settings->irc28_30, settings->irc28_30,
+			settings->irc31_33, settings->irc31_33, settings->irc31_33);
+	mipi_dsi_generic_write_multi(&dctx, gamma_cmd, GAMMA_CMD_LEN);
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xf7, 0x03);
+	mipi_dsi_generic_write_seq_multi(&dctx, LEVEL1_OFF);
+	mipi_dsi_dcs_write_var_seq_multi(&dctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
+			min(brightness, 255));
 
-	if (ret < 0) {
-		dev_err(&dsi->dev, "%s mipi_dsi_generic_write failed: %d", __func__, ret);
-		return ret;
-	}
+	return dctx.accum_err;
+}
 
-	mipi_brightness = min(brightness, 255);
-	mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
-			   &mipi_brightness, sizeof(mipi_brightness));
+static int s6e3fa7_ams604nl01_init(struct s6e3fa7_ams604nl01_drv *drv)
+{
+	struct mipi_dsi_multi_context dctx = { .dsi = drv->dsi };
+	int *err = &dctx.accum_err;
 
-	return 0;
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dctx);
+
+	msleep(20);
+
+	/* TE Vsync On */
+	mipi_dsi_dcs_set_tear_on_multi(&dctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+
+	mipi_dsi_generic_write_seq_multi(&dctx, LEVEL1_ON);
+
+	/* PCD Setting */
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xcc, 0x4c);
+
+	/* ERR_FG */
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xed, 0x44);
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xb9, 0x00,
+			0x00, 0x14, 0x00, 0x18, 0x00, 0x00, 0x00,
+			0x00, 0x11, 0x01, 0x02, 0x40, 0x02, 0x40);
+
+	/* FFC SYNC */
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xc5, 0x09,
+			0x10, 0xc8, 0x21, 0x67, 0x11, 0x26, 0xd4);
+
+	/* AVC 2.0 */
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xf4, 0xbb,
+			0x1e, 0x19, 0x3a, 0x9f, 0x0f, 0x09, 0xc0,
+			0x00, 0xb4, 0x37, 0x70, 0x79, 0x69);
+
+	/* SAVE 5C enable */
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xb0, 0x0e);
+	mipi_dsi_generic_write_seq_multi(&dctx, 0xf2, 0x80);
+
+	mipi_dsi_generic_write_seq_multi(&dctx, LEVEL1_OFF);
+
+	/* init/restore "backlight" */
+	*err = *err ?: s6e3fa7_ams604nl01_update_status(drv->panel.backlight);
+
+	usleep_range(10000, 11000);
+
+	mipi_dsi_dcs_set_display_on_multi(&dctx);
+
+	return *err;
 }
 
 static int s6e3fa7_ams604nl01_prepare(struct drm_panel *panel)
 {
 	struct s6e3fa7_ams604nl01_drv *drv = to_s6e3fa7_ams604nl01_drv(panel);
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = drv->dsi };
 	int ret;
 
-	if (!drv->vregs_enabled) {
-		ret = regulator_bulk_enable(NUM_VREGS, drv->vregs);
-		if (ret) {
-			dev_err(drv->dev, "Failed to enable regulators: %d\n", ret);
-			return ret;
-		}
+	if (drv->panel_on)
+		return 0;
 
-		drv->vregs_enabled = true;
+	ret = regulator_bulk_enable(NUM_VREGS, drv->vregs);
+	if (ret < 0) {
+		dev_err(drv->dev, "Failed to enable regulators: %d\n", ret);
+		return ret;
 	}
-
 
 	gpiod_set_value_cansleep(drv->reset, 0);
 	usleep_range(10000, 11000);
@@ -1092,63 +1112,44 @@ static int s6e3fa7_ams604nl01_prepare(struct drm_panel *panel)
 	gpiod_set_value_cansleep(drv->reset, 0);
 	usleep_range(10000, 11000);
 
-	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+	ret = s6e3fa7_ams604nl01_init(drv);
+	if (ret) {
+		dev_err(drv->dev, "failed to init panel: %d", ret);
+		gpiod_set_value_cansleep(drv->reset, 1);
+		regulator_bulk_disable(NUM_VREGS, drv->vregs);
+		return ret;
+	}
 
-	msleep(20);
-
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x35, 0x00);  // TE Vsync On
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, LEVEL1_ON);
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xcc, 0x4c); // PCD Setting
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xed, 0x44); // ERR_FG
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb9, 0x00, 0x00, 0x14, // TSP SYNC
-			0x00, 0x18, 0x00, 0x00, 0x00, 0x00,
-			0x11, 0x01, 0x02, 0x40, 0x02, 0x40);
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xc5, 0x09, 0x10, 0xc8, // FFC SYNC
-			0x21, 0x67, 0x11, 0x26, 0xd4);
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xf4, 0xbb, 0x1e, // AVC 2.0
-			0x19, 0x3a, 0x9f, 0x0f, 0x09, 0xc0,
-			0x00, 0xb4, 0x37, 0x70, 0x79, 0x69);
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x0e); // SAVE 5C enable
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xf2, 0x80);
-	mipi_dsi_generic_write_seq_multi(&dsi_ctx, LEVEL1_OFF);
-
-	s6e3fa7_ams604nl01_update_status(drv->panel.backlight);
-
-	usleep_range(10000, 11000);
-
-	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
-
-	return dsi_ctx.accum_err;
+	drv->panel_on = true;
+	return 0;
 }
 
 static int s6e3fa7_ams604nl01_unprepare(struct drm_panel *panel)
 {
 	struct s6e3fa7_ams604nl01_drv *drv = to_s6e3fa7_ams604nl01_drv(panel);
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = drv->dsi };
+	struct mipi_dsi_multi_context dctx = { .dsi = drv->dsi };
 	int ret;
 
-	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
+	if (!drv->panel_on)
+		return 0;
+
+	mipi_dsi_dcs_set_display_off_multi(&dctx);
 
 	msleep(10);
 
-	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_dcs_enter_sleep_mode_multi(&dctx);
 
 	msleep(120);
 
 	gpiod_set_value_cansleep(drv->reset, 1);
 
-	if (drv->vregs_enabled) {
-		ret = regulator_bulk_disable(NUM_VREGS, drv->vregs);
-		if (ret) {
-			dev_err(drv->dev,
-				"Failed to disable regulators: %d\n", ret);
-			return ret;
-		}
+	ret = regulator_bulk_disable(NUM_VREGS, drv->vregs);
+	if (ret)
+		dev_err(drv->dev, "Failed to disable regulators: %d\n", ret);
 
-		drv->vregs_enabled = false;
-	}
+	drv->panel_on = false;
 
-	return dsi_ctx.accum_err;
+	return 0;
 }
 
 static const struct drm_display_mode s6e3fa7_ams604nl01_mode_2220x1080 = {
@@ -1165,8 +1166,7 @@ static const struct drm_display_mode s6e3fa7_ams604nl01_mode_2220x1080 = {
 	.height_mm = 138,
 };
 
-static int s6e3fa7_ams604nl01_get_modes(struct drm_panel *panel,
-		struct drm_connector *connector)
+static int s6e3fa7_ams604nl01_get_modes(struct drm_panel *panel, struct drm_connector *connector)
 {
 	return drm_connector_helper_get_modes_fixed(connector,
 			&s6e3fa7_ams604nl01_mode_2220x1080);
@@ -1177,6 +1177,7 @@ static const struct drm_panel_funcs s6e3fa7_ams604nl01_panel_funcs = {
 	.unprepare = s6e3fa7_ams604nl01_unprepare,
 	.get_modes = s6e3fa7_ams604nl01_get_modes
 };
+
 static const struct backlight_ops s6e3fa7_ams604nl01_bl_ops = {
 	.get_brightness = s6e3fa7_ams604nl01_get_brightness,
 	.update_status = s6e3fa7_ams604nl01_update_status,
@@ -1203,23 +1204,22 @@ static int s6e3fa7_ams604nl01_probe(struct mipi_dsi_device *dsi)
 
 	drv->dev = &dsi->dev;
 	drv->dsi = dsi;
-	drv->vregs[0].supply = "vdd";
-	drv->vregs[1].supply = "vddr";
-	drv->vregs[2].supply = "vci";
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO_BURST |
 			  MIPI_DSI_MODE_LPM |
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS;
 
-	ret = devm_regulator_bulk_get(dev, NUM_VREGS, drv->vregs);
+	ret = devm_regulator_bulk_get_const(dev,
+			ARRAY_SIZE(s6e3fa7_ams604nl01_vregs),
+			s6e3fa7_ams604nl01_vregs, &drv->vregs);
 	if (ret)
 		return ret;
 
 	drv->reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(drv->reset))
-		return dev_err_probe(dev, PTR_ERR(drv->reset),
-				"Failed to get reset-gpios: %d\n", ret);
+		return dev_err_probe(dev, PTR_ERR(drv->reset), "Failed to get reset-gpios: %d\n",
+				     ret);
 
 	drm_panel_init(&drv->panel, dev, &s6e3fa7_ams604nl01_panel_funcs,
 			DRM_MODE_CONNECTOR_DSI);
@@ -1227,10 +1227,11 @@ static int s6e3fa7_ams604nl01_probe(struct mipi_dsi_device *dsi)
 	drv->panel.prepare_prev_first = true;
 
 	bl_dev = devm_backlight_device_register(dev, dev_name(dev), dev, drv,
-			&s6e3fa7_ams604nl01_bl_ops, &s6e3fa7_ams604nl01_bl_props);
+						&s6e3fa7_ams604nl01_bl_ops,
+						&s6e3fa7_ams604nl01_bl_props);
 	if (IS_ERR_OR_NULL(bl_dev))
 		return dev_err_probe(dev, PTR_ERR(bl_dev) ?: -ENODATA,
-				"Failed to register backlight device");
+				     "Failed to register backlight device");
 
 	drv->panel.backlight = bl_dev;
 	drm_panel_add(&drv->panel);
