@@ -429,6 +429,7 @@ config MSM_MMCC_8960
 
 config MSM_GCC_8953_DEBUG
 	tristate "MSM8953 Clock Debugger"
+	depends on DEBUG_FS
 	help
 	  Support for the clock debugger for msm8953 devices.
 
