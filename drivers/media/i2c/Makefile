@@ -171,3 +171,4 @@ obj-$(CONFIG_VIDEO_WM8775) += wm8775.o
 
 # Dummy Camera Driver
 obj-$(CONFIG_VIDEO_DUMMY_CAMERA) += dummy_camera.o
+obj-$(CONFIG_VIDEO_CAMERA_OVERLAY_MANAGER) += camera-overlay-manager.o

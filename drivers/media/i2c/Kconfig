@@ -799,6 +799,15 @@ config VIDEO_VGXY61
 	  This is a Video4Linux2 sensor driver for the ST VGXY61
 	  camera sensor.
 
+config VIDEO_CAMERA_OVERLAY_MANAGER
+	tristate "Camera overlay manager"
+	depends on OF_OVERLAY
+	select V4L2_CCI_I2C
+	# depends on OF && GPIOLIB
+	help
+	  This driver allows in-kernel detection of interchangeable
+	  or removable camera modules and overlay application.
+
 config VIDEO_DUMMY_CAMERA
 	tristate "Dummy camera"
 	# depends on OF && GPIOLIB
