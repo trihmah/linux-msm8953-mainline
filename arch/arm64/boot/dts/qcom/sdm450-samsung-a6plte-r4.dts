@@ -984,8 +984,7 @@
 	model = "samsung-gmax";
 	audio-routing =
 		"AMIC1", "MIC BIAS External1",
-		"AMIC2", "MIC BIAS Internal2",
-		"AMIC3", "MIC BIAS External1";
+		"AMIC2", "MIC BIAS External1";
 	pinctrl-0 = <&cdc_pdm_lines_act &cdc_pdm_lines_2_act &cdc_pdm_comp_lines_act &quat_tlmm_default>;
 	pinctrl-1 = <&cdc_pdm_lines_sus &cdc_pdm_lines_2_sus &cdc_pdm_comp_lines_sus &quat_tlmm_default>;
 	pinctrl-names = "default", "sleep";
