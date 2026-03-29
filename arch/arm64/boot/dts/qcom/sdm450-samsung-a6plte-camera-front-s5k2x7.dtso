@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/clock/qcom,gcc-msm8953.h>
+#include <dt-bindings/gpio/gpio.h>
+
+&cci_i2c0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	camera-sensor@10 {
+		compatible = "samsung,s5k2x7sp";
+		reg = <0x10>;
+		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+		clock-frequency = <24000000>;
+		reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
+		dvdd-supply = <&pm8953_l23>;
+		avdd-supply = <&avdd_cam_front>;
+		vio-supply = <&vddio_cam>;
+		flash-leds = <&front_flash>;
+		rotation = <90>;
+		orientation = <0>;
+
+		port {
+			front_cam_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&csiphy1_ep>;
+			};
+		};
+	};
+};
+
+&camss {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+
+			csiphy1_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&front_cam_ep>;
+			};
+		};
+	};
+};
+

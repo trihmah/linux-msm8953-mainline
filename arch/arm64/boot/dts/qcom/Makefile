@@ -239,7 +239,18 @@ dtb-$(CONFIG_ARCH_QCOM)	+= sc8280xp-microsoft-blackrock.dtb sc8280xp-microsoft-b
 dtb-$(CONFIG_ARCH_QCOM)	+= sda660-inforce-ifc6560.dtb
 dtb-$(CONFIG_ARCH_QCOM)	+= sdm450-lenovo-tbx605f.dtb
 dtb-$(CONFIG_ARCH_QCOM)	+= sdm450-motorola-ali.dtb
+
+sdm450-samsung-a6plte-camera-rear-s5k2p6-dtbs := \
+	sdm450-samsung-a6plte-r4.dtb sdm450-samsung-a6plte-camera-rear-s5k2p6.dtbo
+sdm450-samsung-a6plte-camera-front-s5k2x7-dtbs := \
+	sdm450-samsung-a6plte-r4.dtb sdm450-samsung-a6plte-camera-front-s5k2x7.dtbo
+sdm450-samsung-a6plte-camera-aux-sr556-dtbs := \
+	sdm450-samsung-a6plte-r4.dtb sdm450-samsung-a6plte-camera-aux-sr556.dtbo
 dtb-$(CONFIG_ARCH_QCOM)	+= sdm450-samsung-a6plte-r4.dtb
+dtb-$(CONFIG_ARCH_QCOM)	+= sdm450-samsung-a6plte-camera-rear-s5k2p6.dtb
+dtb-$(CONFIG_ARCH_QCOM)	+= sdm450-samsung-a6plte-camera-front-s5k2x7.dtb
+dtb-$(CONFIG_ARCH_QCOM)	+= sdm450-samsung-a6plte-camera-aux-sr556.dtb
+
 dtb-$(CONFIG_ARCH_QCOM)	+= sdm450-xiaomi-rosy.dtb
 dtb-$(CONFIG_ARCH_QCOM)	+= sdm630-sony-xperia-ganges-kirin.dtb
 dtb-$(CONFIG_ARCH_QCOM)	+= sdm630-sony-xperia-nile-discovery.dtb

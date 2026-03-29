@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/clock/qcom,gcc-msm8953.h>
+#include <dt-bindings/gpio/gpio.h>
+
+&cci_i2c0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	camera-sensor@28 {
+		compatible = "hynix,sr556";
+		reg = <0x28>;
+		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+		clock-names = "clk";
+		clock-frequency = <24000000>;
+		reset-gpios = <&tlmm 41 GPIO_ACTIVE_LOW>;
+		dvdd-supply = <&vdd_cam_aux>;
+		avdd-supply = <&vdd_cam_aux>;
+		dovdd-supply = <&vddio_cam>;
+		// V4L2 doesn't allow sharing flash-leds yet
+		//flash-leds = <&rear_flash>;
+		rotation = <270>;
+		orientation = <1>;
+
+		port {
+			aux_cam_ep: endpoint {
+				data-lanes = <0 1>;
+				remote-endpoint = <&csiphy2_ep>;
+				link-frequencies = /bits/ 64 <437000000>;
+			};
+		};
+	};
+};
+
+&camss {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@2 {
+			reg = <2>;
+
+			csiphy2_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1>;
+				remote-endpoint = <&aux_cam_ep>;
+			};
+		};
+	};
+};
+

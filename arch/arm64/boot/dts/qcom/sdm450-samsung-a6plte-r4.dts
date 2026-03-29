@@ -87,6 +87,56 @@
 		temperature-lookup-table = NTC_THERM_LUT;
 	};
 
+	camera-manager {
+		compatible = "camera-sensor-manager";
+		platform-camera-system = <&camss>;
+
+		pinctrl-0 = <&camss_mclk0_default>, <&camss_mclk1_default>;
+		pinctrl-names = "default";
+
+		rear-samsung-s5k2p6 {
+			slot = <0>;
+			i2c-bus = <&cci_i2c1>;
+			i2c-addr = <0x2d>;
+			clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+			clock-frequency = <24000000>;
+			dvdd-supply = <&vdd_cam_main>;
+			avdd-supply = <&vdd_cam_main>;
+			vio-supply = <&vdd_cam_main>;
+			reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
+			test-register = <16 0x00 0x2106>;
+			overlay = "qcom/sdm450-samsung-a6plte-camera-rear-s5k2p6.dtbo";
+		};
+
+		front-samsung-s5k2x7 {
+			slot = <1>;
+			i2c-bus = <&cci_i2c0>;
+			i2c-addr = <0x10>;
+			clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+			clock-frequency = <24000000>;
+			dvdd-supply = <&pm8953_l23>;
+			avdd-supply = <&avdd_cam_front>;
+			vio-supply = <&vddio_cam>;
+			reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
+			test-register = <16 0x2000 0x2187>;
+			overlay = "qcom/sdm450-samsung-a6plte-camera-front-s5k2x7.dtbo";
+		};
+
+		aux-hynix-sr556 {
+			slot = <2>;
+			i2c-bus = <&cci_i2c0>;
+			i2c-addr = <0x28>;
+			clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+			clock-frequency = <24000000>;
+			dvdd-supply = <&vdd_cam_aux>;
+			avdd-supply = <&vdd_cam_aux>;
+			dovdd-supply = <&vddio_cam>;
+			reset-gpios = <&tlmm 41 GPIO_ACTIVE_LOW>;
+			test-register = <16 0x0f16 0x0556>;
+			overlay = "qcom/sdm450-samsung-a6plte-camera-aux-sr556.dtbo";
+		};
+	};
+
 	thermal-zones {
 		ap-thermal {
 			polling-delay = <10000>;
@@ -475,122 +525,16 @@
 	};
 };
 
-&camss {
-	vdda-supply = <&pm8953_s3>;
-
-	status = "okay";
-
-	ports {
-		port@0 {
-			reg = <0>;
-
-			csiphy0_ep: endpoint {
-				clock-lanes = <7>;
-				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&main_cam_ep>;
-			};
-		};
-		port@1 {
-			reg = <1>;
-
-			csiphy1_ep: endpoint {
-				clock-lanes = <7>;
-				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&front_cam_ep>;
-			};
-		};
-		port@2 {
-			reg = <2>;
-
-			csiphy2_ep: endpoint {
-				clock-lanes = <7>;
-				data-lanes = <0 1>;
-				remote-endpoint = <&aux_cam_ep>;
-			};
-		};
-	};
-};
-
-
 &cci {
-	pinctrl-0 = <&cci0_default>,
-		    <&cci1_default>,
-		    <&camss_mclk0_default>,
-		    <&camss_mclk1_default>;
+	pinctrl-0 = <&cci0_default>, <&cci1_default>;
 	pinctrl-names = "default";
 	status = "okay";
 };
 
-&cci_i2c0 {
-	camera-sensor@10 { // Front camera
-		compatible = "samsung,s5k2x7sp", "samsung,s5k2x7";
-		reg = <0x10>;
-		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
-		clock-frequency = <24000000>;
-		reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
-		dvdd-supply = <&pm8953_l23>;
-		avdd-supply = <&avdd_cam_front>;
-		vio-supply = <&vddio_cam>;
-		flash-leds = <&front_flash>;
-		rotation = <90>;
-		orientation = <0>;
+&camss {
+	vdda-supply = <&pm8953_s3>;
 
-		port {
-			front_cam_ep: endpoint {
-				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&csiphy1_ep>;
-			};
-		};
-	};
-
-	camera-sensor@28 { // Auxillary camera
-		compatible = "hynix,sr556";
-		reg = <0x28>;
-		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
-		clock-names = "clk";
-		clock-frequency = <24000000>;
-		reset-gpios = <&tlmm 41 GPIO_ACTIVE_LOW>;
-		dvdd-supply = <&vdd_cam_aux>;
-		avdd-supply = <&vdd_cam_aux>;
-		dovdd-supply = <&vddio_cam>;
-		// V4L2 doesn't allow sharing flash-leds yet 
-		//flash-leds = <&rear_flash>;
-		rotation = <270>;
-		orientation = <1>;
-
-		port {
-			aux_cam_ep: endpoint {
-				data-lanes = <0 1>;
-				remote-endpoint = <&csiphy2_ep>;
-				link-frequencies = /bits/ 64 <437000000>;
-			};
-		};
-	};
-
-};
-
-&cci_i2c1 {
-	camera-sensor@2d { // Main camera
-		compatible = "samsung,s5k2p6sx", "samsung,s5k2p6";
-		reg = <0x2d>;
-		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
-		clock-frequency = <24000000>;
-		reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
-		dvdd-supply = <&vdd_cam_main>;
-		avdd-supply = <&vdd_cam_main>;
-		vio-supply = <&vdd_cam_main>;
-		lens-focus = <&lens_actuator>;
-		flash-leds = <&rear_flash>;
-		rotation = <270>;
-		orientation = <1>;
-
-		port {
-			main_cam_ep: endpoint {
-				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&csiphy0_ep>;
-			};
-		};
-	};
+	status = "disabled";
 };
 
 &hsusb_phy {
